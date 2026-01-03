@@ -1,10 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import Ridge
 import requests
 import io
-import time
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="NBA Market Ratings", layout="wide")
@@ -13,169 +11,169 @@ st.title("🏀 NBA Market-Implied Ratings")
 # --- SIDEBAR CONFIG ---
 with st.sidebar:
     st.header("⚙️ Configuration")
-    current_season = st.text_input("Season (e.g., 2024-25)", value="2025-26")
-    decay_alpha = st.slider("Recency Decay (Alpha)", 0.01, 0.20, 0.10)
+    # Season input primarily for your future database logic
+    current_season = st.text_input("Season", value="2025-26")
     
     st.divider()
     st.write("🗓️ **Schedule Settings**")
+    # Defaults to Today. You can change this to see other days.
     target_date = st.date_input("Target Date", value=pd.to_datetime("today"))
     
-    # Debug Mode
-    show_debug = st.checkbox("Show Debug Info", value=True)
+    st.divider()
+    st.info("ℹ️ **Note:** This app now uses ESPN's API to bypass Cloud IP blocks.")
 
-# --- 1. ROBUST DATA FETCHING ---
+# --- 1. ROBUST DATA FETCHING (ESPN VERSION) ---
 @st.cache_data(ttl=3600)
 def fetch_nba_schedule(date_str):
     """
-    Fetches the scoreboard for a specific date using direct requests 
-    to bypass Cloud IP blocks.
+    Fetches the schedule from ESPN's public API.
+    Much more reliable for Streamlit Cloud than NBA.com.
     """
-    # Endpoint for the specific day's scoreboard
-    url = "https://stats.nba.com/stats/scoreboardv2"
-    
-    params = {
-        'GameDate': date_str,
-        'LeagueID': '00',
-        'DayOffset': '0'
-    }
-    
-    # HEADERS ARE CRITICAL: This pretends to be a Chrome Browser
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Referer': 'https://www.nba.com/',
-        'Origin': 'https://www.nba.com',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'x-nba-stats-origin': 'stats',
-        'x-nba-stats-token': 'true'
-    }
+    # ESPN expects date format YYYYMMDD (e.g., 20260103)
+    espn_date = date_str.replace("-", "")
+    url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={espn_date}"
     
     try:
-        # Timeout is 5 seconds. If NBA.com ignores us, we fail fast.
-        r = requests.get(url, params=params, headers=headers, timeout=5)
+        r = requests.get(url, timeout=5)
         r.raise_for_status()
-        
         data = r.json()
-        headers_list = data['resultSets'][0]['headers']
-        row_set = data['resultSets'][0]['rowSet']
         
-        df = pd.DataFrame(row_set, columns=headers_list)
-        return df
-        
-    except requests.exceptions.Timeout:
-        st.error("❌ Connection Timed Out. NBA.com blocked the request.")
-        return pd.DataFrame()
+        games = []
+        if 'events' not in data:
+            return pd.DataFrame()
+            
+        for event in data['events']:
+            competition = event['competitions'][0]
+            competitors = competition['competitors']
+            
+            # ESPN lists competitors as [Home, Away] or vice versa. 
+            # We must check the 'homeAway' tag.
+            home_team = next(filter(lambda x: x['homeAway'] == 'home', competitors))
+            away_team = next(filter(lambda x: x['homeAway'] == 'away', competitors))
+            
+            # Get Abbreviations (e.g., 'LAL', 'BOS')
+            h_abbr = home_team['team']['abbreviation']
+            a_abbr = away_team['team']['abbreviation']
+            
+            games.append({
+                "HOME_TEAM_ID": h_abbr, 
+                "VISITOR_TEAM_ID": a_abbr
+            })
+            
+        return pd.DataFrame(games)
+
     except Exception as e:
-        st.error(f"❌ Error fetching schedule: {e}")
+        st.error(f"❌ Error fetching from ESPN: {e}")
         return pd.DataFrame()
 
 # --- 2. MAIN LOGIC ---
 
-# A. STATUS UPDATE
+# Status Indicator
 status_text = st.empty()
-status_text.info("⏳ Fetching Schedule from NBA.com...")
+status_text.info(f"⏳ Fetching Schedule for {target_date}...")
 
-# B. FETCH SCHEDULE
+# Fetch Schedule
 date_str = target_date.strftime('%Y-%m-%d')
-if show_debug:
-    st.write(f"Attempting to fetch data for: {date_str}")
-
 schedule_df = fetch_nba_schedule(date_str)
 
 if schedule_df.empty:
-    status_text.error("⚠️ Could not load schedule. (Cloud IP likely blocked by NBA)")
-    st.warning("Since the auto-schedule failed, please manually select teams below.")
-    # Create an empty dataframe so the app doesn't crash
-    current_matchups = pd.DataFrame(columns=['HOME_TEAM_ID', 'VISITOR_TEAM_ID'])
-else:
-    status_text.success("✅ Schedule Loaded!")
-    if show_debug:
-        st.dataframe(schedule_df[['GAME_DATE_EST', 'HOME_TEAM_ID', 'VISITOR_TEAM_ID']].head())
-    current_matchups = schedule_df
-
-# --- 3. TEAM MAPPING (Static Fallback) ---
-# Since we might not be able to fetch the full team list, we hardcode a few IDs for safety
-# In a full app, you'd fetch this once and cache it.
-TEAM_MAP = {
-    1610612737: 'ATL', 1610612738: 'BOS', 1610612751: 'BKN', 1610612766: 'CHA',
-    1610612741: 'CHI', 1610612739: 'CLE', 1610612742: 'DAL', 1610612743: 'DEN',
-    1610612765: 'DET', 1610612744: 'GSW', 1610612745: 'HOU', 1610612754: 'IND',
-    1610612746: 'LAC', 1610612747: 'LAL', 1610612763: 'MEM', 1610612748: 'MIA',
-    1610612749: 'MIL', 1610612750: 'MIN', 1610612740: 'NOP', 1610612752: 'NYK',
-    1610612760: 'OKC', 1610612753: 'ORL', 1610612755: 'PHI', 1610612756: 'PHX',
-    1610612757: 'POR', 1610612758: 'SAC', 1610612759: 'SAS', 1610612761: 'TOR',
-    1610612762: 'UTA', 1610612764: 'WAS'
-}
-
-# --- 4. BUILD THE DASHBOARD ---
-st.subheader("Matchup Settings")
-
-# Convert Schedule to Readable Input Table
-input_rows = []
-
-if not schedule_df.empty:
-    for _, row in schedule_df.iterrows():
-        h_id = row['HOME_TEAM_ID']
-        a_id = row['VISITOR_TEAM_ID']
-        h_abbr = TEAM_MAP.get(h_id, str(h_id))
-        a_abbr = TEAM_MAP.get(a_id, str(a_id))
-        
-        input_rows.append({
-            "Away Team": a_abbr,
-            "Home Team": h_abbr,
-            "Vegas Line (Home)": -5.5 # Placeholder
-        })
-else:
-    # Default rows if schedule fails
+    status_text.warning("⚠️ No games found for this date (or API issue). Using dummy data.")
+    # Fallback Data so the app doesn't look empty
     input_rows = [
         {"Away Team": "BOS", "Home Team": "NYK", "Vegas Line (Home)": -2.5},
         {"Away Team": "LAL", "Home Team": "GSW", "Vegas Line (Home)": 3.0}
     ]
+else:
+    status_text.success(f"✅ Loaded {len(schedule_df)} Games from ESPN!")
+    
+    # Build Input Rows from Real Schedule
+    input_rows = []
+    for _, row in schedule_df.iterrows():
+        input_rows.append({
+            "Away Team": row['VISITOR_TEAM_ID'],
+            "Home Team": row['HOME_TEAM_ID'],
+            "Vegas Line (Home)": 0.0 # Default line
+        })
 
+# --- 3. DASHBOARD ---
+st.subheader("1. Matchup Settings")
 input_df = pd.DataFrame(input_rows)
 
-# EDITABLE TABLE
+# Editable Table
 edited_df = st.data_editor(
     input_df, 
     num_rows="dynamic",
     column_config={
-        "Vegas Line (Home)": st.column_config.NumberColumn(format="%.1f")
+        "Vegas Line (Home)": st.column_config.NumberColumn(
+            "Vegas Line (Home)",
+            help="Enter -5.5 if Home is favored by 5.5",
+            format="%.1f"
+        )
     }
 )
 
-# --- 5. DUMMY RATINGS (To prevent crash) ---
-# In this debug version, I'm using dummy ratings. 
-# Once the schedule works, we will re-connect the Ridge Regression logic.
-ratings = {k: np.random.uniform(-10, 10) for k in TEAM_MAP.values()}
-hfa = -2.5
+# --- 4. PROJECTIONS (Placeholder Logic) ---
+# NOTE: In your final version, you will replace this 'dummy_ratings' dictionary 
+# with the actual 'team_ratings' dictionary from your Ridge Regression model.
 
-st.subheader("Live Projections (Debug Mode)")
+st.subheader("2. Live Projections")
+
+# Placeholder Ratings (Just to show the math works)
+# 'HFA' is usually around -2.7 points (Home Advantage)
+hfa = -2.7
+dummy_ratings = {
+    'BOS': -8.0, 'NYK': -2.0, 'PHI': -3.5, 'MIL': -4.0, 'CLE': -3.0,
+    'DEN': -5.0, 'MIN': -4.5, 'OKC': -6.0, 'LAC': -1.0, 'PHX': -2.5,
+    'LAL': 0.5, 'GSW': 1.0, 'MIA': -1.5, 'ORL': -1.0, 'IND': 0.0
+}
 
 results = []
+
 for _, row in edited_df.iterrows():
     h = row['Home Team']
     a = row['Away Team']
     vegas = row['Vegas Line (Home)']
     
-    # Safe Get
-    r_h = ratings.get(h, 0.0)
-    r_a = ratings.get(a, 0.0)
+    # Lookup Ratings (Default to 0.0 if not found)
+    r_h = dummy_ratings.get(h, 0.0)
+    r_a = dummy_ratings.get(a, 0.0)
     
-    # Calc
+    # MODEL FORMULA: (Home Rating - Away Rating) + HFA
+    # Example: BOS(-8) vs NYK(-2) at BOS
+    # (-8 - -2) + -2.7 = -6 + -2.7 = -8.7 (BOS favored by 8.7)
     model_line = (r_h - r_a) + hfa
+    
+    # EDGE: Model - Vegas
+    # If Model = -8.7, Vegas = -5.5
+    # Edge = -3.2 (Model thinks Home is STRONGER favorite) -> BET HOME
     edge = model_line - vegas
     
+    # SIGNAL LOGIC
     signal = "PASS"
-    if edge < -2.5: signal = f"BET {h}"
-    elif edge > 2.5: signal = f"BET {a}"
+    if edge < -2.0: 
+        signal = f"BET {h}"
+    elif edge > 2.0: 
+        signal = f"BET {a}"
     
     results.append({
         "Matchup": f"{a} @ {h}",
-        "Model": round(model_line, 1),
-        "Vegas": vegas,
+        "Model Line": round(model_line, 1),
+        "Vegas Line": vegas,
         "Edge": round(edge, 1),
         "Signal": signal
     })
 
-st.dataframe(pd.DataFrame(results).style.applymap(
-    lambda x: 'background-color: #d4edda' if "BET" in str(x) else '', subset=['Signal']
-))
+# Display Results
+results_df = pd.DataFrame(results)
+
+def color_signal(val):
+    color = ''
+    if 'BET' in str(val):
+        color = 'background-color: #d4edda; color: #155724; font-weight: bold'
+    return color
+
+st.dataframe(
+    results_df.style.map(color_signal, subset=['Signal']), 
+    use_container_width=True,
+    hide_index=True
+)
