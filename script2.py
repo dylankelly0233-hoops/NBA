@@ -11,7 +11,6 @@ st.title("🏀 NBA Market-Implied Ratings")
 # --- SIDEBAR CONFIG ---
 with st.sidebar:
     st.header("⚙️ Configuration")
-    # Season input primarily for your future database logic
     current_season = st.text_input("Season", value="2025-26")
     
     st.divider()
@@ -20,7 +19,7 @@ with st.sidebar:
     target_date = st.date_input("Target Date", value=pd.to_datetime("today"))
     
     st.divider()
-    st.info("ℹ️ **Note:** This app now uses ESPN's API to bypass Cloud IP blocks.")
+    st.info("ℹ️ **Note:** This app uses ESPN's API to bypass Cloud IP blocks.")
 
 # --- 1. ROBUST DATA FETCHING (ESPN VERSION) ---
 @st.cache_data(ttl=3600)
@@ -29,7 +28,7 @@ def fetch_nba_schedule(date_str):
     Fetches the schedule from ESPN's public API.
     Much more reliable for Streamlit Cloud than NBA.com.
     """
-    # ESPN expects date format YYYYMMDD (e.g., 20260103)
+    # ESPN expects date format YYYYMMDD
     espn_date = date_str.replace("-", "")
     url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={espn_date}"
     
@@ -80,8 +79,8 @@ if schedule_df.empty:
     status_text.warning("⚠️ No games found for this date (or API issue). Using dummy data.")
     # Fallback Data so the app doesn't look empty
     input_rows = [
-        {"Away Team": "BOS", "Home Team": "NYK", "Vegas Line (Home)": -2.5},
-        {"Away Team": "LAL", "Home Team": "GSW", "Vegas Line (Home)": 3.0}
+        {"Away Team": "BOS", "Home Team": "NY", "Vegas Line (Home)": -2.5},
+        {"Away Team": "LAL", "Home Team": "GS", "Vegas Line (Home)": 3.0}
     ]
 else:
     status_text.success(f"✅ Loaded {len(schedule_df)} Games from ESPN!")
@@ -112,19 +111,21 @@ edited_df = st.data_editor(
     }
 )
 
-# --- 4. PROJECTIONS (Placeholder Logic) ---
-# NOTE: In your final version, you will replace this 'dummy_ratings' dictionary 
-# with the actual 'team_ratings' dictionary from your Ridge Regression model.
-
+# --- 4. PROJECTIONS ---
 st.subheader("2. Live Projections")
 
-# Placeholder Ratings (Just to show the math works)
-# 'HFA' is usually around -2.7 points (Home Advantage)
-hfa = -2.7
+# ⚠️ PLACEHOLDER RATINGS ⚠️
+# In the future, you can replace this dictionary with one loaded from a CSV 
+# or calculated from 'Net Rating'.
+# These keys MUST match ESPN abbreviations (e.g. 'UTAH', 'NY', 'GS', 'NO', 'SA').
+hfa = -2.7 
 dummy_ratings = {
-    'BOS': -8.0, 'NYK': -2.0, 'PHI': -3.5, 'MIL': -4.0, 'CLE': -3.0,
-    'DEN': -5.0, 'MIN': -4.5, 'OKC': -6.0, 'LAC': -1.0, 'PHX': -2.5,
-    'LAL': 0.5, 'GSW': 1.0, 'MIA': -1.5, 'ORL': -1.0, 'IND': 0.0
+    'BOS': -9.0, 'OKC': -7.5, 'MIN': -6.0, 'DEN': -5.5, 'NY': -4.5,
+    'PHI': -4.0, 'LAC': -3.5, 'CLE': -3.0, 'MIL': -3.0, 'DAL': -2.5,
+    'PHX': -2.5, 'NO': -2.0, 'IND': -1.5, 'MIA': -1.0, 'ORL': -1.0,
+    'SAC': -0.5, 'GS': 0.0, 'LAL': 0.0, 'HOU': 1.0, 'CHI': 2.0,
+    'ATL': 2.5, 'BKN': 3.0, 'UTAH': 3.5, 'TOR': 4.0, 'MEM': 4.5,
+    'CHA': 5.0, 'POR': 5.5, 'SA': 6.0, 'WAS': 7.0, 'DET': 8.0
 }
 
 results = []
@@ -139,13 +140,11 @@ for _, row in edited_df.iterrows():
     r_a = dummy_ratings.get(a, 0.0)
     
     # MODEL FORMULA: (Home Rating - Away Rating) + HFA
-    # Example: BOS(-8) vs NYK(-2) at BOS
-    # (-8 - -2) + -2.7 = -6 + -2.7 = -8.7 (BOS favored by 8.7)
+    # Example: BOS(-9) vs NY(-4.5)
+    # (-9 - -4.5) + -2.7 = -7.2 (BOS favored by 7.2)
     model_line = (r_h - r_a) + hfa
     
     # EDGE: Model - Vegas
-    # If Model = -8.7, Vegas = -5.5
-    # Edge = -3.2 (Model thinks Home is STRONGER favorite) -> BET HOME
     edge = model_line - vegas
     
     # SIGNAL LOGIC
@@ -164,16 +163,21 @@ for _, row in edited_df.iterrows():
     })
 
 # Display Results
-results_df = pd.DataFrame(results)
+if results:
+    results_df = pd.DataFrame(results)
 
-def color_signal(val):
-    color = ''
-    if 'BET' in str(val):
-        color = 'background-color: #d4edda; color: #155724; font-weight: bold'
-    return color
+    # Styling Helper
+    def color_signal(val):
+        color = ''
+        if 'BET' in str(val):
+            color = 'background-color: #d4edda; color: #155724; font-weight: bold'
+        return color
 
-st.dataframe(
-    results_df.style.map(color_signal, subset=['Signal']), 
-    use_container_width=True,
-    hide_index=True
-)
+    # FIX: Use 'applymap' instead of 'map' for compatibility
+    st.dataframe(
+        results_df.style.applymap(color_signal, subset=['Signal']), 
+        use_container_width=True,
+        hide_index=True
+    )
+else:
+    st.info("Waiting for matchups...")
