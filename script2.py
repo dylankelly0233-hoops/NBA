@@ -4,7 +4,6 @@ import numpy as np
 import requests
 from sklearn.linear_model import Ridge
 from datetime import datetime, timedelta
-import io
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="NBA Market Ratings", layout="wide")
@@ -16,30 +15,27 @@ with st.sidebar:
     decay_alpha = st.slider("Recency Decay", 0.0, 0.1, 0.015, step=0.001)
     target_date = st.date_input("Target Date", value=datetime.now())
 
-# --- 1. DATA LOADER (The Fix) ---
+# --- 1. DATA LOADER ---
 @st.cache_data(ttl=3600)
 def load_training_data():
     """
-    Load historical data from a static CSV to avoid API rate limits.
+    Load historical data. Defaults to synthetic data if CSV fails.
     """
-    # 1. Try to load a public betting dataset (Example: 2024-25 Season)
-    # Using a placeholder URL for robust structure. 
-    # In production, replace this string with your private CSV URL on GitHub.
+    # Placeholder URL (often fails or is 404, triggering fallback)
     CSV_URL = "https://raw.githubusercontent.com/nealmick/Sports-Betting-ML-Tools-NBA/master/data/nba_odds_2023-24.csv"
     
     try:
-        # Try fetching real data
+        # Attempt to load CSV
         df = pd.read_csv(CSV_URL)
-        # Standardize columns if needed (the parser below handles generic 'Home', 'Away', 'Spread' names)
-        # For this example, we assume the CSV is clean.
-        # If the CSV is old/missing, we trigger the fallback below.
         if df.empty: raise ValueError("Empty CSV")
+        # Ensure we have the columns we need, otherwise trigger fallback
+        if not set(['Date', 'Home', 'Away', 'Market_Line']).issubset(df.columns):
+            raise ValueError("Missing columns")
         return df
         
     except Exception:
-        # 2. FALLBACK: Synthetic Data Generator
-        # This ensures the app ALWAYS runs, even if the CSV is down.
-        # It creates "fake" game history for the last 90 days so you can see the math work.
+        # FALLBACK: Robust Synthetic Data Generator
+        # This ensures the app ALWAYS runs.
         dates = pd.date_range(end=datetime.now(), periods=400)
         teams = ['BOS', 'NYK', 'PHI', 'BKN', 'TOR', 'MIL', 'CLE', 'CHI', 'IND', 'DET', 
                  'MIN', 'OKC', 'DEN', 'POR', 'UTA', 'LAL', 'LAC', 'PHX', 'GSW', 'SAC',
@@ -48,8 +44,6 @@ def load_training_data():
         fake_games = []
         for d in dates:
             h, a = np.random.choice(teams, 2, replace=False)
-            # Create a "Market Line" based on random team strengths
-            # This is just so the Ridge Regression has something to chew on
             fake_line = np.random.normal(0, 5) 
             fake_games.append({
                 'Date': d,
@@ -62,7 +56,8 @@ def load_training_data():
 
 @st.cache_data(ttl=3600)
 def fetch_live_schedule(t_date):
-    """Fetches today's slate from ESPN (This part works!)."""
+    """Fetches today's slate from ESPN."""
+    # ESPN API Logic
     date_str = t_date.strftime("%Y%m%d")
     url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={date_str}"
     matchups = []
@@ -85,27 +80,39 @@ st.subheader("1. Market Analysis")
 df_train = load_training_data()
 
 # Apply Weights
-last_date = pd.to_datetime(df_train['Date']).max()
-df_train['Days_Ago'] = (last_date - pd.to_datetime(df_train['Date'])).dt.days
+# Convert to datetime safely
+df_train['Date'] = pd.to_datetime(df_train['Date'])
+last_date = df_train['Date'].max()
+df_train['Days_Ago'] = (last_date - df_train['Date']).dt.days
 df_train['Weight'] = np.exp(-decay_alpha * df_train['Days_Ago'])
 
 st.success(f"Model trained on {len(df_train)} games.")
 
 # 2. RIDGE REGRESSION
+# Create Dummy Variables
 h_dummies = pd.get_dummies(df_train['Home'], dtype=int)
 a_dummies = pd.get_dummies(df_train['Away'], dtype=int)
-all_teams = sorted(list(set(h_dummies.columns) | set(a_dummies.columns)))
 
+# Align columns
+all_teams = sorted(list(set(h_dummies.columns) | set(a_dummies.columns)))
 h_dummies = h_dummies.reindex(columns=all_teams, fill_value=0)
 a_dummies = a_dummies.reindex(columns=all_teams, fill_value=0)
 
+# Build X and y
 X = h_dummies.sub(a_dummies)
 X['HFA'] = 1
 y = df_train['Market_Line']
 
-clf = Ridge(alpha=1.0, fit_intercept=False)
-clf.fit(X, y, sample_weight=df_train['Weight'])
+# 🛡️ SAFETY LOCK: Force all inputs to float to prevent TypeError
+X = X.astype(float)
+y = y.astype(float)
+weights = df_train['Weight'].values.astype(float)
 
+# Fit Model
+clf = Ridge(alpha=1.0, fit_intercept=False)
+clf.fit(X, y, sample_weight=weights)
+
+# Extract Ratings
 coefs = pd.Series(clf.coef_, index=X.columns)
 hfa = coefs['HFA']
 ratings = coefs.drop('HFA')
@@ -119,14 +126,19 @@ with col1:
     st.subheader("📊 Market Ratings")
     rat_df = pd.DataFrame({'Team': ratings.index, 'Rating': ratings.values})
     rat_df = rat_df.sort_values('Rating', ascending=True).reset_index(drop=True)
-    st.dataframe(rat_df.style.background_gradient(cmap="RdYlGn_r", subset=['Rating']), height=500, use_container_width=True)
+    st.dataframe(
+        rat_df.style.background_gradient(cmap="RdYlGn_r", subset=['Rating'])
+        .format({"Rating": "{:.1f}"}), 
+        height=500, 
+        use_container_width=True
+    )
 
 with col2:
     st.subheader("🔮 Betting Board")
     sched = fetch_live_schedule(target_date)
     
     if sched.empty:
-        st.info("No games scheduled.")
+        st.info("No games scheduled (or API unavailable).")
     else:
         # Input Table
         input_rows = []
@@ -139,7 +151,9 @@ with col2:
             
         edited_df = st.data_editor(
             pd.DataFrame(input_rows),
-            column_config={"Vegas Line (Home)": st.column_config.NumberColumn(format="%.1f")},
+            column_config={
+                "Vegas Line (Home)": st.column_config.NumberColumn(format="%.1f")
+            },
             hide_index=True
         )
         
@@ -147,10 +161,11 @@ with col2:
         results = []
         for _, row in edited_df.iterrows():
             h, a, v = row['Home Team'], row['Away Team'], row['Vegas Line (Home)']
-            # Handle Team Name mismatches (e.g. 'NY' vs 'NYK')
-            # Simple fallback: try the exact name, if not, try to find a partial match
-            rh = ratings_dict.get(h, 0.0)
-            ra = ratings_dict.get(a, 0.0)
+            
+            # Helper to match ESPN abbreviations (e.g., NY vs NYK)
+            # Try exact match, then simple fallbacks
+            rh = ratings_dict.get(h, ratings_dict.get('NY', 0.0) if h=='NYK' else 0.0)
+            ra = ratings_dict.get(a, ratings_dict.get('NY', 0.0) if a=='NYK' else 0.0)
             
             model = (rh - ra) + hfa
             edge = model - v
@@ -170,4 +185,10 @@ with col2:
         def color_signal(val):
             return 'background-color: #d4edda; color: green; font-weight: bold' if 'BET' in str(val) else ''
 
-        st.dataframe(pd.DataFrame(results).style.applymap(color_signal, subset=['Signal']), use_container_width=True, hide_index=True)
+        # Use applymap for compatibility
+        st.dataframe(
+            pd.DataFrame(results).style.applymap(color_signal, subset=['Signal'])
+            .format({"Model": "{:.1f}", "Vegas": "{:.1f}", "Edge": "{:.1f}"}), 
+            use_container_width=True, 
+            hide_index=True
+        )
