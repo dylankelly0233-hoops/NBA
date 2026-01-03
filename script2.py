@@ -21,20 +21,20 @@ def load_training_data():
     """
     Load historical data. Defaults to synthetic data if CSV fails.
     """
-    # Placeholder URL (often fails or is 404, triggering fallback)
+    # Placeholder URL for public data
     CSV_URL = "https://raw.githubusercontent.com/nealmick/Sports-Betting-ML-Tools-NBA/master/data/nba_odds_2023-24.csv"
     
     try:
-        # Attempt to load CSV
         df = pd.read_csv(CSV_URL)
         if df.empty: raise ValueError("Empty CSV")
-        # Ensure we have the columns we need, otherwise trigger fallback
-        if not set(['Date', 'Home', 'Away', 'Market_Line']).issubset(df.columns):
-            raise ValueError("Missing columns")
+        # Ensure minimal columns exist
+        req_cols = ['Date', 'Home', 'Away', 'Market_Line']
+        if not set(req_cols).issubset(df.columns):
+            raise ValueError(f"Missing columns. Found: {df.columns}")
         return df
         
     except Exception:
-        # FALLBACK: Robust Synthetic Data Generator
+        # FALLBACK: Synthetic Data Generator
         # This ensures the app ALWAYS runs.
         dates = pd.date_range(end=datetime.now(), periods=400)
         teams = ['BOS', 'NYK', 'PHI', 'BKN', 'TOR', 'MIL', 'CLE', 'CHI', 'IND', 'DET', 
@@ -57,7 +57,6 @@ def load_training_data():
 @st.cache_data(ttl=3600)
 def fetch_live_schedule(t_date):
     """Fetches today's slate from ESPN."""
-    # ESPN API Logic
     date_str = t_date.strftime("%Y%m%d")
     url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={date_str}"
     matchups = []
@@ -80,7 +79,6 @@ st.subheader("1. Market Analysis")
 df_train = load_training_data()
 
 # Apply Weights
-# Convert to datetime safely
 df_train['Date'] = pd.to_datetime(df_train['Date'])
 last_date = df_train['Date'].max()
 df_train['Days_Ago'] = (last_date - df_train['Date']).dt.days
@@ -103,16 +101,18 @@ X = h_dummies.sub(a_dummies)
 X['HFA'] = 1
 y = df_train['Market_Line']
 
-# 🛡️ SAFETY LOCK: Force all inputs to float to prevent TypeError
-X = X.astype(float)
-y = y.astype(float)
-weights = df_train['Weight'].values.astype(float)
+# 🛡️ THE NUCLEAR FIX: Force NumPy Conversion 🛡️
+# This strips away all Pandas metadata that causes the TypeError
+X_mat = X.values.astype(np.float64)  # Force pure float matrix
+y_vec = y.values.astype(np.float64)  # Force pure float vector
+w_vec = df_train['Weight'].values.astype(np.float64) # Force pure float weights
 
-# Fit Model
+# Fit Model (Using Pure Numpy Arrays)
 clf = Ridge(alpha=1.0, fit_intercept=False)
-clf.fit(X, y, sample_weight=weights)
+clf.fit(X_mat, y_vec, sample_weight=w_vec)
 
 # Extract Ratings
+# We map the numpy results back to team names using X.columns
 coefs = pd.Series(clf.coef_, index=X.columns)
 hfa = coefs['HFA']
 ratings = coefs.drop('HFA')
@@ -126,9 +126,10 @@ with col1:
     st.subheader("📊 Market Ratings")
     rat_df = pd.DataFrame({'Team': ratings.index, 'Rating': ratings.values})
     rat_df = rat_df.sort_values('Rating', ascending=True).reset_index(drop=True)
+    
+    # Simple styling that works on all versions
     st.dataframe(
-        rat_df.style.background_gradient(cmap="RdYlGn_r", subset=['Rating'])
-        .format({"Rating": "{:.1f}"}), 
+        rat_df,
         height=500, 
         use_container_width=True
     )
@@ -163,7 +164,6 @@ with col2:
             h, a, v = row['Home Team'], row['Away Team'], row['Vegas Line (Home)']
             
             # Helper to match ESPN abbreviations (e.g., NY vs NYK)
-            # Try exact match, then simple fallbacks
             rh = ratings_dict.get(h, ratings_dict.get('NY', 0.0) if h=='NYK' else 0.0)
             ra = ratings_dict.get(a, ratings_dict.get('NY', 0.0) if a=='NYK' else 0.0)
             
